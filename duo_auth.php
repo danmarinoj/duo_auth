@@ -16,10 +16,12 @@ require_once 'Client.php';
 require_once 'Auth.php';
 require_once 'Requester.php';
 require_once 'CurlRequester.php';
+use Duo\DuoUniversal\Client;
+use Duo\DuoUniversal\DuoException;
 
 class duo_auth extends rcube_plugin 
 {
-	
+
 	function init() 
 	{
 		$rcmail = rcmail::get_instance();
@@ -39,25 +41,26 @@ class duo_auth extends rcube_plugin
 		
 		$ikey = $this->get('IKEY');
 		$skey = $this->get('SKEY');
-	        $host = $this->get('HOST');
+        $host = $this->get('HOST');
+        $redirect = $this->get('REDIRECT');
+        $user = trim(rcube_utils::get_input_value('_user', rcube_utils::INPUT_POST, true));
 
-        	$user = trim(rcube_utils::get_input_value('_user', rcube_utils::INPUT_POST, true));
-		$D = new DuoAPI\Auth($ikey, $skey, $host);
-		$result=$D->preauth($user);
-
-		// bypass Roundcube users without DUO account
-		if($result["response"]["response"]["result"] == "auth") {
-		}
-		else {
-			$_SESSION['_Duo_2FAuth'] = True;
-			header('Location: ?_task=mail');
-		}
+        try {
+            $duo_client = new Client(
+                $ikey,
+                $skey,
+                $host,
+                $redirect
+            );
+        } catch (DuoException $e) {
+            throw new ErrorException("*** Duo config error. Verify the values in the duo config are correct ***\n" . $e->getMessage());
+        }
 
 		// bypass local users
 		if(in_array($user, $this->get('2FA_OVERRIDE_USERS'))) {
-                        $_SESSION['_Duo_2FAuth'] = True;
-                        header('Location: ?_task=mail');
-                }
+            $_SESSION['_Duo_2FAuth'] = True;
+            header('Location: ?_task=mail');
+        }
 
 
 		// 2FA override with specific IPs 
@@ -74,48 +77,6 @@ class duo_auth extends rcube_plugin
 		$rcmail->output->send('plugin');
 	}
     
-	//intermediate page for Duo 2FA. Fetches the Duo javascript, initializes Duo and renders the Duo iframe.
-	function generate_html() 
-	{
-		$rcmail = rcmail::get_instance();
-		$rcmail->output->set_pagetitle('Duo Authentication');
-		
-		$this->include_script('js/Duo-Web-v2.min.js');
-		
-		$ikey = $this->get('IKEY');
-		$skey = $this->get('SKEY');
-        	$host = $this->get('HOST');
-        	$akey = $this->get('AKEY');
-
-        	$user = trim(rcube_utils::get_input_value('_user', rcube_utils::INPUT_POST, true));
-        	
-		$sig_request = Duo::signRequest($ikey, $skey, $akey, $user);
-
-		$content =	"<script>
-						Duo.init({
-							'host': '" . $host . "',
-							'post_action': '.',
-							'sig_request': '" . $sig_request . "'
-						});
-				</script>
-				<center>	
-					<iframe id=\"duo_iframe\" frameborder=\"0\" allowtransparency=\"true\" style=\"background: transparent;\">
-					</iframe>
-					<style>
-					  #duo_iframe {
-					    width: 100%;
-					    min-width: 304px;
-					    max-width: 620px;
-					    height: 330px;
-					    border: none;
-					  }
-				</style>
-				</center>";	
-		
-		return($content);
-	}
-	
-	
 	//hook called on every roundcube page request. Makes sure that user is authenticated using 2 factors.
 	function check_2FA($p)
 	{
@@ -136,11 +97,30 @@ class duo_auth extends rcube_plugin
 		//checking 2nd factor of authentication.
 		else if(isset($_POST['sig_response']))
 		{
-			$ikey = $this->get('IKEY');
-			$skey = $this->get('SKEY');
-			$akey = $this->get('AKEY');
-			
-			$resp = Duo::verifyResponse($ikey, $skey, $akey, $_POST['sig_response']);
+            $ikey = $this->get('IKEY');
+            $skey = $this->get('SKEY');
+            $host = $this->get('HOST');
+            $redirect = $this->get('REDIRECT');
+            $username = trim(rcube_utils::get_input_value('_user', rcube_utils::INPUT_POST, true));
+
+            try {
+                $duo_client = new Client(
+                    $ikey,
+                    $skey,
+                    $host,
+                    $redirect
+                );
+            } catch (DuoException $e) {
+                throw new ErrorException("*** Duo config error. Verify the values in the duo config are correct ***\n" . $e->getMessage());
+            }
+
+            $state = $duo_client->generateState();
+            $_SESSION['state'] = $state;
+            $_SESSION['username'] = $username;
+
+            # Redirect to prompt URI which will redirect to the client's redirect URI after 2FA
+            $prompt_uri = $duo_client->createAuthUrl($username, $state);
+            $resp = url(prompt_uri)
 			
 			//successful 2FA login.
 			if($resp != NULL)
@@ -190,7 +170,4 @@ class duo_auth extends rcube_plugin
     		$ip_ip = ip2long ($IP);
     		return (($ip_ip & $ip_mask) == ($ip_net & $ip_mask));
 	}
-
-
-
 }
